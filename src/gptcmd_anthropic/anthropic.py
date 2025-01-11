@@ -191,9 +191,7 @@ class AnthropicProvider(LLMProvider):
             ]
 
         try:
-            resp = self._anthropic.beta.prompt_caching.messages.create(
-                **kwargs
-            )
+            resp = self._anthropic.messages.create(**kwargs)
         except anthropic.APIError as e:
             raise CompletionError(str(e)) from e
 
@@ -251,7 +249,7 @@ class AnthropicProvider(LLMProvider):
         valid_opts = (
             frozenset(
                 inspect.signature(
-                    self._anthropic.beta.prompt_caching.messages.create
+                    self._anthropic.messages.create
                 ).parameters.keys()
             )
             - SPECIAL_OPTS
