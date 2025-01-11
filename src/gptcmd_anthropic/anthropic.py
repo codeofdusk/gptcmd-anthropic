@@ -31,8 +31,9 @@ class AnthropicProvider(LLMProvider):
     SUPPORTED_FEATURES = LLMProviderFeature.RESPONSE_STREAMING
 
     def __init__(self, client, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self._anthropic = client
+        self._models = {m.id for m in self._anthropic.models.list()}
+        super().__init__(*args, **kwargs)
         self._stream = True
         self.update_api_params(self.__class__.DEFAULT_API_PARAMS)
 
@@ -225,20 +226,13 @@ class AnthropicProvider(LLMProvider):
 
     @property
     def valid_models(self):
-        # Unfortunately, there doesn't seem to be a programmatic way to get
-        # this list
-        return (
+        return self._models | {
+            # Some model aliases aren't included in the API-provided list.
+            # Include these manually.
             "claude-3-5-sonnet-latest",
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-sonnet-20240620",
             "claude-3-5-haiku-latest",
             "claude-3-opus-latest",
-            "claude-3-opus-20240229",
-            "claude-3-sonnet-20240229",
-            "claude-3-haiku-20240307",
-            "claude-2.1",
-            "claude-2.0",
-        )
+        }
 
     @staticmethod
     def _clamp(val, bottom, top):
