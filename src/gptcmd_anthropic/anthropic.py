@@ -66,6 +66,10 @@ class AnthropicProvider(LLMProvider):
         sampled_tokens: int,
     ) -> Optional[Decimal]:
         COST_PER_PROMPT_SAMPLED: Dict[str, Tuple[Decimal, Decimal]] = {
+            "claude-3-7-sonnet-20250219": (
+                Decimal("3") / Decimal("1000000"),
+                Decimal("15") / Decimal("1000000"),
+            ),
             "claude-3-5-sonnet-20241022": (
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
