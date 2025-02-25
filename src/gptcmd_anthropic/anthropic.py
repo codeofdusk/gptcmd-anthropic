@@ -226,13 +226,14 @@ class AnthropicProvider(LLMProvider):
             )
 
     def get_best_model(self):
-        return "claude-3-5-sonnet-latest"
+        return "claude-3-7-sonnet-latest"
 
     @property
     def valid_models(self):
         return self._models | {
             # Some model aliases aren't included in the API-provided list.
             # Include these manually.
+            "claude-3-7-sonnet-latest",
             "claude-3-5-sonnet-latest",
             "claude-3-5-haiku-latest",
             "claude-3-opus-latest",
