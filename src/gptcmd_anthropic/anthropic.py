@@ -284,12 +284,14 @@ class StreamedClaudeResponse(LLMResponse):
         super().__init__(m)
 
     def _update_usage(self, usage_obj):
-        self._prompt += getattr(usage_obj, "input_tokens", 0)
-        self._cache_write += getattr(
-            usage_obj, "cache_creation_input_tokens", 0
+        self._prompt += getattr(usage_obj, "input_tokens", 0) or 0
+        self._cache_write += (
+            getattr(usage_obj, "cache_creation_input_tokens", 0) or 0
         )
-        self._cache_read += getattr(usage_obj, "cache_read_input_tokens", 0)
-        self._sampled += getattr(usage_obj, "output_tokens", 0)
+        self._cache_read += (
+            getattr(usage_obj, "cache_read_input_tokens", 0) or 0
+        )
+        self._sampled += getattr(usage_obj, "output_tokens", 0) or 0
 
     def __iter__(self):
         try:
