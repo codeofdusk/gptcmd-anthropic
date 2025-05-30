@@ -224,14 +224,32 @@ class AnthropicProvider(LLMProvider):
         if isinstance(resp, anthropic.Stream):
             return StreamedClaudeResponse(resp, self)
         else:
+            # Build the message content while capturing any "thinking" blocks
+            _output = []
+            _thinking_text = []
+            _thinking_signature = []
+
+            for _block in resp.content:
+                if _block.type == "text":
+                    _output.append(_block.text)
+                elif _block.type == "thinking":
+                    if hasattr(_block, "thinking"):
+                        _thinking_text.append(_block.thinking)
+                    if hasattr(_block, "signature"):
+                        _thinking_signature.append(_block.signature)
+
             msg = Message(
-                content="".join(
-                    block.text
-                    for block in resp.content
-                    if block.type == "text"
-                ),
+                content="".join(_output),
                 role=resp.role,
             )
+            if _thinking_text or _thinking_signature:
+                meta = msg.metadata
+                if _thinking_text:
+                    meta["anthropic_thinking_text"] = "".join(_thinking_text)
+                if _thinking_signature:
+                    meta["anthropic_thinking_signature"] = "".join(
+                        _thinking_signature
+                    )
             return LLMResponse(
                 message=msg,
                 prompt_tokens=resp.usage.input_tokens
@@ -300,6 +318,10 @@ class StreamedClaudeResponse(LLMResponse):
         m = Message(content="", role="")
         super().__init__(m)
 
+    def _put_metadata(self, key: str, addition: str) -> None:
+        meta = self.message.metadata
+        meta[key] = meta.get(key, "") + addition
+
     def _update_usage(self, usage_obj):
         self._prompt += getattr(usage_obj, "input_tokens", 0) or 0
         self._cache_write += (
@@ -345,6 +367,20 @@ class StreamedClaudeResponse(LLMResponse):
                     next_text = chunk.delta.text
                     self.message.content += next_text
                     yield next_text
+                elif (
+                    chunk.type == "content_block_delta"
+                    and chunk.delta.type == "thinking_delta"
+                ):
+                    self._put_metadata(
+                        "anthropic_thinking_text", chunk.delta.thinking
+                    )
+                elif (
+                    chunk.type == "content_block_delta"
+                    and chunk.delta.type == "signature_delta"
+                ):
+                    self._put_metadata(
+                        "anthropic_thinking_signature", chunk.delta.signature
+                    )
         except anthropic.APIError as e:
             raise CompletionError(str(e)) from e
 
