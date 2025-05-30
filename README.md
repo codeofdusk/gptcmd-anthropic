@@ -1,7 +1,7 @@
 # Gptcmd-anthropic
 Gptcmd-anthropic adds support for [Anthropic](https://anthropic.com)'s Claude models to [Gptcmd](https://github.com/codeofdusk/gptcmd).
 
-[Python](https://python.org) 3.8.6 or later, Gptcmd 2.0.0 or later, and an [Anthropic API key](https://console.anthropic.com/account/keys) are required to use this package. Gptcmd-anthropic is available on PyPI, and can, for instance, be installed with `pip install gptcmd-anthropic` at a command line shell.
+[Python](https://python.org) 3.8.6 or later, Gptcmd 2.2.0 or later, and an [Anthropic API key](https://console.anthropic.com/account/keys) are required to use this package. Gptcmd-anthropic is available on PyPI, and can, for instance, be installed with `pip install gptcmd-anthropic` at a command line shell.
 
 ## Configuration
 To use Gptcmd-anthropic, you'll need to add a new account to your Gptcmd configuration or modify your default account. If no `api_key` is specified in your configuration, Gptcmd-anthropic uses the API key in the `ANTHROPIC_API_KEY` environment variable. An example configuration follows:
