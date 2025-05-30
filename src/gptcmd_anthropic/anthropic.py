@@ -27,7 +27,6 @@ from gptcmd.message import Image, Message, MessageRole
 
 
 class AnthropicProvider(LLMProvider):
-    DEFAULT_API_PARAMS = {"max_tokens": 4096}
     SUPPORTED_FEATURES = LLMProviderFeature.RESPONSE_STREAMING
 
     def __init__(self, client, *args, **kwargs):
@@ -35,7 +34,6 @@ class AnthropicProvider(LLMProvider):
         self._models = {m.id for m in self._anthropic.models.list()}
         super().__init__(*args, **kwargs)
         self._stream = True
-        self.update_api_params(self.__class__.DEFAULT_API_PARAMS)
 
     def _render_message(self, msg: Message) -> Dict[str, Any]:
         return {
@@ -117,12 +115,27 @@ class AnthropicProvider(LLMProvider):
             + Decimal(sampled_tokens) * sampled_scale
         ) * Decimal("100")
 
+    @staticmethod
+    def _max_tokens_cap(model: str) -> int:
+        """Return the model-specific hard limit, else 4096."""
+        by_model = {
+            "claude-opus-4-20250514": 32000,
+            "claude-sonnet-4-20250514": 64000,
+            "claude-3-7-sonnet-20250219": 64000,
+            "claude-3-5-sonnet-20241022": 8192,
+            "claude-3-5-sonnet-20240620": 8192,
+            "claude-3-5-haiku-20241022": 8192,
+        }
+        return by_model.get(model, 4096)
+
     def complete(self, messages):
         kwargs = {
             "model": self.model,
             "stream": self.stream,
             **self.api_params,
         }
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = self._max_tokens_cap(self.model)
         kwargs["messages"] = []
         system_text = ""
 
@@ -261,21 +274,17 @@ class AnthropicProvider(LLMProvider):
             )
             - SPECIAL_OPTS
         )
-        CLAMPED = {"temperature": (0, 1), "max_tokens": (0, 4096)}
+        CLAMPED = {"temperature": (0, 1)}
 
         for opt in params:
             if opt not in valid_opts:
                 raise InvalidAPIParameterError(f"Unknown parameter {opt}")
+            elif opt == "max_tokens":
+                hi = self.__class__._max_tokens_cap(self.model)
+                params[opt] = self.__class__._clamp(params[opt], 0, hi)
             elif opt in CLAMPED:
                 params[opt] = self.__class__._clamp(params[opt], *CLAMPED[opt])
         return params
-
-    def unset_api_param(self, key):
-        super().unset_api_param(key)
-        if key in self.__class__.DEFAULT_API_PARAMS:
-            self.set_api_param(key, self.__class__.DEFAULT_API_PARAMS[key])
-        elif key is None:
-            self.update_api_params(self.__class__.DEFAULT_API_PARAMS)
 
 
 class StreamedClaudeResponse(LLMResponse):
