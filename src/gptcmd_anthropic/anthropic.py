@@ -226,7 +226,7 @@ class AnthropicProvider(LLMProvider):
             )
 
     def get_best_model(self):
-        return "claude-3-7-sonnet-latest"
+        return "claude-opus-4-20250514"
 
     @property
     def valid_models(self):
