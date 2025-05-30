@@ -36,13 +36,25 @@ class AnthropicProvider(LLMProvider):
         self._stream = True
 
     def _render_message(self, msg: Message) -> Dict[str, Any]:
-        return {
-            "role": msg.role,
-            "content": [
+        content = []
+        if (
+            "anthropic_thinking_text" in msg.metadata
+            and "anthropic_thinking_signature" in msg.metadata
+        ):
+            content.append(
+                {
+                    "type": "thinking",
+                    "signature": msg.metadata["anthropic_thinking_signature"],
+                    "thinking": msg.metadata["anthropic_thinking_text"],
+                }
+            )
+        content.extend(
+            [
                 {"type": "text", "text": msg.content},
                 *[self.format_attachment(a) for a in msg.attachments],
-            ],
-        }
+            ]
+        )
+        return {"role": msg.role, "content": content}
 
     @classmethod
     def from_config(cls, conf: Dict):
