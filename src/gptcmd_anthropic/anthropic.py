@@ -8,7 +8,6 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 """
 
 import anthropic
-import base64
 import inspect
 
 from decimal import Decimal
