@@ -148,6 +148,9 @@ class AnthropicProvider(LLMProvider):
             kwargs["max_tokens"] = self._max_tokens_cap(self.model)
         kwargs["messages"] = []
         system_text = ""
+        force_cache_system = None
+        always_cache = set()
+        never_cache = set()
 
         def _collapse(content1, content2):
             if isinstance(content1, str):
@@ -173,6 +176,12 @@ class AnthropicProvider(LLMProvider):
                     system_text += "\n\n" + m.content
                 else:
                     system_text = m.content
+
+                val = m.metadata.get("anthropic_cache_breakpoint")
+                if val is True:
+                    force_cache_system = True
+                elif val is False and force_cache_system is not True:
+                    force_cache_system = False
             else:
                 rendered_message = self._render_message(m)
                 if (
@@ -183,12 +192,20 @@ class AnthropicProvider(LLMProvider):
                     # Claude doesn't support consecutive messages with the
                     # same role.
                     # "collapse" these spans to one message each.
+                    target_idx = len(kwargs["messages"]) - 1
                     kwargs["messages"][-1]["content"] = _collapse(
                         kwargs["messages"][-1]["content"],
                         rendered_message["content"],
                     )
                 else:
                     kwargs["messages"].append(rendered_message)
+                    target_idx = len(kwargs["messages"]) - 1
+
+                val = m.metadata.get("anthropic_cache_breakpoint")
+                if val is True:
+                    always_cache.add(target_idx)
+                elif val is False:
+                    never_cache.add(target_idx)
 
         cache_weights = []
         for i, msg in enumerate(kwargs["messages"]):
@@ -205,26 +222,69 @@ class AnthropicProvider(LLMProvider):
             cache_weights, key=lambda x: x[1], reverse=True
         )
 
-        num_to_mark = 2 if system_text else 3
-        for i, _ in cache_candidates[:num_to_mark]:
+        should_cache_system = (
+            (
+                True
+                if force_cache_system is True
+                else (
+                    False if force_cache_system is False else True
+                )  # default to cache
+            )
+            if system_text
+            else False
+        )
+
+        MAX_CACHE_BREAKPOINTS = 4
+        # Reserve slots already taken by explicit user requests and the
+        # system message if applicable.
+        free_cache_slots = (
+            MAX_CACHE_BREAKPOINTS
+            - len(always_cache)
+            - (1 if should_cache_system else 0)
+        )
+        free_cache_slots = max(free_cache_slots, 0)
+
+        auto_to_cache: set[int] = set()
+
+        # Try to reserve a slot for the very last user message
+        last_user_idx = next(
+            (
+                i
+                for i in range(len(kwargs["messages"]) - 1, -1, -1)
+                if kwargs["messages"][i]["role"] == "user"
+            ),
+            None,
+        )
+        if (
+            last_user_idx is not None
+            and last_user_idx not in always_cache
+            and last_user_idx not in never_cache
+            and free_cache_slots > 0
+        ):
+            auto_to_cache.add(last_user_idx)
+            free_cache_slots -= 1
+
+        # Fill in remaining slots based on weights
+        for i, _ in cache_candidates:
+            if free_cache_slots == 0:
+                break
+            if i in always_cache or i in never_cache or i in auto_to_cache:
+                continue
+            auto_to_cache.add(i)
+            free_cache_slots -= 1
+
+        to_cache = always_cache | auto_to_cache
+
+        for i in to_cache:
             msg = kwargs["messages"][i]
             if msg["content"]:
                 msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
-        # Always cache the last user message
-        for msg in reversed(kwargs["messages"]):
-            if msg["role"] == "user":
-                msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
-                break
-
         if system_text:
-            kwargs["system"] = [
-                {
-                    "type": "text",
-                    "text": system_text,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+            system_block = {"type": "text", "text": system_text}
+            if should_cache_system:
+                system_block["cache_control"] = {"type": "ephemeral"}
+            kwargs["system"] = [system_block]
 
         try:
             resp = self._anthropic.messages.create(**kwargs)

@@ -31,7 +31,22 @@ Switched to account 'default'
 Consult Gptcmd's readme for additional usage instructions.
 
 ## Prompt caching
-To save costs, Gptcmd-anthropic dynamically inserts [cache breakpoints](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) on the system message (if present), the final user message, and the largest messages of a conversation based on content length and number of attachments. This feature is currently not user configurable.
+To save costs, Gptcmd-anthropic dynamically inserts [cache breakpoints](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) on the system message (if present), the final user message, and the largest messages of a conversation based on content length and number of attachments.
+
+You may override this dynamic strategy on a per-message basis by setting the `anthropic_cache_breakpoint` metadata field:
+
+* If set to `True`, the message will always be cached.
+* If set to `False`, the message will never be cached.
+* If a span of consecutive messages of the same role contains conflicting breakpoint metadata (one message set to always cache, the next set to never cache), the entire span will be cached.
+
+For instance:
+
+```
+(claude-opus-4-20250514) user Cache me!
+'Cache me!' added as user
+(claude-opus-4-20250514) meta anthropic_cache_breakpoint True
+anthropic_cache_breakpoint set to True on 'Cache me!'
+```
 
 ## Extended thinking
 You may enable extended thinking with a command like `set thinking {"type": "enabled", "budget_tokens": 1024}`. When extended thinking mode is enabled, a summary of the thinking process can be found at the `anthropic_thinking_text` metadata key on the generated assistant message (consult the Gptcmd readme for details).
