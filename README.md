@@ -49,4 +49,33 @@ anthropic_cache_breakpoint set to True on 'Cache me!'
 ```
 
 ## Extended thinking
-You may enable extended thinking with a command like `set thinking {"type": "enabled", "budget_tokens": 1024}`. When extended thinking mode is enabled, a summary of the thinking process can be found at the `anthropic_thinking_text` metadata key on the generated assistant message (consult the Gptcmd readme for details).
+You may enable extended thinking with a command like `set thinking {"type": "enabled", "budget_tokens": 1024}`. When extended thinking mode is enabled, a summary of the thinking process can be found at the `anthropic_thinking_text` metadata field on the generated assistant message.
+
+```
+(claude-opus-4-20250514) set thinking {"type": "enabled", "budget_tokens": 1024}
+thinking set to {'type': 'enabled', 'budget_tokens': 1024}
+(claude-opus-4-20250514) say The quick brown fox jumps over the lazy dog.
+...
+That's the famous pangram! It's a sentence that contains every letter of the English alphabet at least once. It's commonly used for:
+
+- Testing typewriters and keyboards
+- Displaying font samples
+- Practicing typing
+- Testing telecommunication equipment
+
+It uses exactly 35 letters total and has been popular since at least the late 1800s. Is there something specific you'd like to know about this sentence, or were you perhaps testing something?
+(claude-opus-4-20250514) meta anthropic_thinking_text
+'The user has sent me the famous pangram "The quick brown fox jumps over the lazy dog." This sentence contains all 26 letters of the English alphabet at least once. They haven\'t asked me to do anything specific with it, so I should acknowledge it and perhaps share something interesting about it.'
+```
+
+If you use this feature frequently, you might find a macro like this to be helpful (add it to the `[macros]` section of your Gptcmd configuration, adding the section if it doesn't exist):
+
+``` toml
+[macros]
+ct = """
+account claude
+set thinking {{"type": "enabled", "budget_tokens": {1?8192}}}
+"""
+```
+
+Then, the `ct` command will enable thinking with a budget of 8,192 tokens (by default, or specify the budget to use as an argument to the macro).
