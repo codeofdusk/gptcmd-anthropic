@@ -13,8 +13,6 @@ import inspect
 
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
-from urllib.error import URLError
-from urllib.request import urlopen
 
 from gptcmd.llm import (
     CompletionError,
@@ -399,17 +397,11 @@ class StreamedClaudeResponse(LLMResponse):
 
 @AnthropicProvider.register_attachment_formatter(Image)
 def format_image_for_claude(img):
-    try:
-        resp = urlopen(img.url)
-        mimetype = resp.headers.get("content-type")
-        b64data = base64.b64encode(resp.read())
-        return {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mimetype,
-                "data": b64data.decode("utf-8"),
-            },
-        }
-    except URLError as e:
-        raise CompletionError(str(e.reason)) from e
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": img.mimetype,
+            "data": img.b64,
+        },
+    }
