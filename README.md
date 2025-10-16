@@ -68,7 +68,7 @@ It uses exactly 35 letters total and has been popular since at least the late 18
 'The user has sent me the famous pangram "The quick brown fox jumps over the lazy dog." This sentence contains all 26 letters of the English alphabet at least once. They haven\'t asked me to do anything specific with it, so I should acknowledge it and perhaps share something interesting about it.'
 ```
 
-If you use this feature frequently, you might find a macro like this to be helpful (add it to the `[macros]` section of your Gptcmd configuration, adding the section if it doesn't exist):
+If you use this feature frequently, you might find a macro like this to be helpful (add it to the `[macros]` section of your Gptcmd configuration, adding the section if it doesn't exist). Replace `claude` below with the name of your Gptcmd-anthropic account:
 
 ``` toml
 [macros]
