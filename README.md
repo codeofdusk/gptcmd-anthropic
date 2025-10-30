@@ -79,3 +79,16 @@ set thinking {{"type": "enabled", "budget_tokens": {1?8192}}}
 ```
 
 Then, the `ct` command will enable thinking with a budget of 8,192 tokens (by default, or specify the budget to use as an argument to the macro).
+
+## Server-side tools
+Tools provided by Anthropic, such as web search, may be used. However, tool responses (such as search citations) are not currently stored, displayed, or passed back to the model.
+
+To search the web with Claude, you might wish to add a macro like this (the first argument specifies the maximum number of searches allowed, default 5) to the `[macros]` section of your Gptcmd configuration (if you also added the thinking macro, you might replace `account claude` in this macro to an invocation of that one, or add this `set` line to that macro):
+
+```
+[macros]
+cw="""
+account claude
+set tools [{{"type": "web_search_20250305", "name": "web_search", "max_uses": {1?5}}}]
+"""
+```
