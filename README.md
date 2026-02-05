@@ -68,17 +68,27 @@ It uses exactly 35 letters total and has been popular since at least the late 18
 'The user has sent me the famous pangram "The quick brown fox jumps over the lazy dog." This sentence contains all 26 letters of the English alphabet at least once. They haven\'t asked me to do anything specific with it, so I should acknowledge it and perhaps share something interesting about it.'
 ```
 
+Newer models support an "adaptive" thinking mode with graduated levels rather than a strict thinking budget. This feature requires version 0.77.0 or later of the Anthropic Python library:
+
+```
+(claude-opus-4-6) set thinking {"type": "adaptive"}
+thinking set to {'type': 'adaptive'}
+(claude-opus-4-6) set output_config {"effort": "max"}
+output_config set to {'effort': 'max'}
+```
+
 If you use this feature frequently, you might find a macro like this to be helpful (add it to the `[macros]` section of your Gptcmd configuration, adding the section if it doesn't exist). Replace `claude` below with the name of your Gptcmd-anthropic account:
 
 ``` toml
 [macros]
 ct = """
 account claude
-set thinking {{"type": "enabled", "budget_tokens": {1?8192}}}
+set thinking {{"type": "adaptive"}}
+set output_config {{"effort": "{1?max"}}}
 """
 ```
 
-Then, the `ct` command will enable thinking with a budget of 8,192 tokens (by default, or specify the budget to use as an argument to the macro).
+Then, the `ct` command will enable thinking with the "max" reasoning level (by default, or specify the level to use as an argument to the macro).
 
 ## Server-side tools
 Tools provided by Anthropic, such as web search, may be used. However, tool responses (such as search citations) are not currently stored, displayed, or passed back to the model.
