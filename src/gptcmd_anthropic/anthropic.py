@@ -11,7 +11,7 @@ import inspect
 
 from copy import deepcopy
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import anthropic
 
@@ -25,8 +25,25 @@ from gptcmd.llm import (
 from gptcmd.message import Image, Message, MessageRole
 
 
+class _CacheTarget(NamedTuple):
+    index: int
+    block_end: int
+    weight: int
+
+
+class _CacheSelection(NamedTuple):
+    to_cache: Set[int]
+    request_cache_active: bool
+
+
 class AnthropicProvider(LLMProvider):
     SUPPORTED_FEATURES = LLMProviderFeature.RESPONSE_STREAMING
+    _DEFAULT_CACHE_CONTROL: Dict[str, Any] = {"type": "ephemeral"}
+    _MAX_CACHE_BREAKPOINTS = 4
+    _MAX_CACHE_LOOKBACK_BLOCKS = 20
+    # Weight is num_blocks * 1000 + total text chars; 8000 is roughly a
+    # single-block message with 7000 text characters.
+    _MIN_LARGE_CACHE_MESSAGE_WEIGHT = 8000
 
     def __init__(self, client, *args, **kwargs):
         self._anthropic = client
@@ -189,91 +206,265 @@ class AnthropicProvider(LLMProvider):
         )
         return len(content) * 1000 + total_text_length
 
-    @staticmethod
     def _should_cache_system(
-        system_text: str, force_cache_system: Optional[bool]
+        self,
+        system_text: str,
+        force_cache_system: Optional[bool],
+        always_cache: Set[int],
     ) -> bool:
         if not system_text:
             return False
-        if force_cache_system is True:
-            return True
-        if force_cache_system is False:
-            return False
-        return True
+
+        if force_cache_system is not None:
+            return bool(force_cache_system)
+
+        return len(always_cache) < self._MAX_CACHE_BREAKPOINTS
 
     @classmethod
-    def _select_default_cache_targets(
+    def _select_spaced_targets(
         cls,
+        candidates: Sequence[_CacheTarget],
+        slots: int,
+        reserved_positions: Sequence[int],
+    ) -> List[_CacheTarget]:
+        """Choose up to ``slots`` evenly spaced targets. Pure."""
+        if slots <= 0 or not candidates:
+            return []
+        reserved = list(reserved_positions)
+        ordered = sorted(candidates, key=lambda t: t.block_end)
+        usable_slots = min(slots, len(ordered))
+        start_block = ordered[0].block_end
+        end_block = ordered[-1].block_end
+        # Half the API's 20-block cache lookback keeps explicit markers
+        # spaced enough that each lookup has room to find earlier entries.
+        min_gap = cls._MAX_CACHE_LOOKBACK_BLOCKS // 2
+        selected: List[_CacheTarget] = []
+        selected_indices: Set[int] = set()
+        for step in range(1, usable_slots + 1):
+            target_block = start_block + (
+                (end_block - start_block) * step / (usable_slots + 1)
+            )
+            available = [t for t in ordered if t.index not in selected_indices]
+            if not available:
+                break
+            chosen = min(
+                available,
+                key=lambda t: (
+                    int(
+                        min(
+                            (abs(t.block_end - pos) for pos in reserved),
+                            default=min_gap,
+                        )
+                        < min_gap
+                    ),
+                    abs(t.block_end - target_block),
+                    -t.weight,
+                    t.block_end,
+                ),
+            )
+            selected.append(chosen)
+            selected_indices.add(chosen.index)
+            reserved.append(chosen.block_end)
+        return selected
+
+    def _select_default_cache_targets(
+        self,
         anthropic_messages: Sequence[Dict[str, Any]],
+        system_text: str,
         always_cache: Set[int],
         never_cache: Set[int],
         should_cache_system: bool,
-    ) -> Set[int]:
-        cache_weights = [
-            (i, cls._message_weight(msg["content"]))
-            for i, msg in enumerate(anthropic_messages)
-        ]
-        cache_candidates = sorted(
-            cache_weights, key=lambda item: item[1], reverse=True
-        )
+        *,
+        force_request_cache: bool = False,
+        prefix_block_count: int = 0,
+    ) -> _CacheSelection:
+        """Select automatic explicit and request-level cache breakpoints.
 
-        max_cache_breakpoints = 4
-        cache_slots = max(
-            (
-                max_cache_breakpoints
-                - len(always_cache)
-                - (1 if should_cache_system else 0)
-            ),
+        Block numbering is 1-indexed across tools, then system, then
+        messages. The automatic request-level breakpoint consumes one of the
+        four cache slots when active. Explicit slots go first to forced
+        metadata breakpoints and the system block, then to one large message,
+        then to evenly spaced stable-region messages kept at least ten blocks
+        from existing breakpoints where possible. When request-level caching
+        is active or the last message is cached by the metadata field,
+        prefer candidates whose block_end falls before the final 20-block
+        cache lookback window.
+        """
+        targets: List[_CacheTarget] = []
+        next_block_start = prefix_block_count + (2 if system_text else 1)
+        for i, msg in enumerate(anthropic_messages):
+            block_count = len(msg["content"])
+            if block_count <= 0:
+                continue
+            block_end = next_block_start + block_count - 1
+            targets.append(
+                _CacheTarget(
+                    index=i,
+                    block_end=block_end,
+                    weight=self._message_weight(msg["content"]),
+                )
+            )
+            next_block_start = block_end + 1
+
+        total_blocks = next_block_start - 1
+        mandatory_breakpoints = len(always_cache) + int(should_cache_system)
+        tail_always_cache = bool(targets) and targets[-1].index in always_cache
+        tail_never_cache = (
+            bool(targets)
+            and targets[-1].index in never_cache
+            and targets[-1].index not in always_cache
+        )
+        request_cache_active = force_request_cache or (
+            total_blocks > 0
+            and mandatory_breakpoints < self._MAX_CACHE_BREAKPOINTS
+            and not tail_always_cache
+            and not tail_never_cache
+        )
+        explicit_budget = self._MAX_CACHE_BREAKPOINTS - int(
+            request_cache_active
+        )
+        free_explicit_slots = max(
+            explicit_budget - mandatory_breakpoints,
             0,
         )
 
-        auto_to_cache: Set[int] = set()
-        last_user_idx = next(
-            (
-                i
-                for i in range(len(anthropic_messages) - 1, -1, -1)
-                if anthropic_messages[i]["role"] == MessageRole.USER
-            ),
-            None,
+        reserved_positions: List[int] = []
+        if should_cache_system:
+            reserved_positions.append(prefix_block_count + 1)
+
+        target_lookup = {target.index: target for target in targets}
+        reserved_positions.extend(
+            target_lookup[i].block_end
+            for i in sorted(always_cache)
+            if i in target_lookup
         )
-        if (
-            last_user_idx is not None
-            and last_user_idx not in always_cache
-            and last_user_idx not in never_cache
-            and cache_slots > 0
-        ):
-            auto_to_cache.add(last_user_idx)
-            cache_slots -= 1
 
-        for i, _ in cache_candidates:
-            if cache_slots == 0:
-                break
-            if i in always_cache or i in never_cache or i in auto_to_cache:
-                continue
-            auto_to_cache.add(i)
-            cache_slots -= 1
+        auto_to_cache: Set[int] = set()
+        eligible = [
+            target
+            for target in targets
+            if target.index not in always_cache
+            and target.index not in never_cache
+        ]
+        explicit_candidates = eligible
+        if request_cache_active and targets:
+            tail_index = targets[-1].index
+            explicit_candidates = [
+                target for target in eligible if target.index != tail_index
+            ]
 
-        return always_cache | auto_to_cache
+        if free_explicit_slots > 0 and explicit_candidates:
+            remaining_slots = free_explicit_slots
+            large_message_candidates = [
+                target
+                for target in explicit_candidates
+                if (
+                    target.index not in auto_to_cache
+                    and target.weight >= self._MIN_LARGE_CACHE_MESSAGE_WEIGHT
+                )
+            ]
+
+            if large_message_candidates:
+                large_message = min(
+                    large_message_candidates,
+                    key=lambda target: (
+                        -target.weight,
+                        target.block_end,
+                    ),
+                )
+                auto_to_cache.add(large_message.index)
+                reserved_positions.append(large_message.block_end)
+                remaining_slots -= 1
+
+            if remaining_slots > 0:
+                preferred_candidates = [
+                    target
+                    for target in explicit_candidates
+                    if target.index not in auto_to_cache
+                ]
+                if request_cache_active or tail_always_cache:
+                    tail_start = max(
+                        1,
+                        total_blocks - self._MAX_CACHE_LOOKBACK_BLOCKS + 1,
+                    )
+                    preferred_candidates = [
+                        target
+                        for target in preferred_candidates
+                        if target.block_end < tail_start
+                    ]
+                    if not preferred_candidates:
+                        preferred_candidates = [
+                            target
+                            for target in explicit_candidates
+                            if target.index not in auto_to_cache
+                        ]
+
+                selected = self._select_spaced_targets(
+                    preferred_candidates,
+                    remaining_slots,
+                    reserved_positions,
+                )
+                auto_to_cache.update(target.index for target in selected)
+                reserved_positions.extend(
+                    target.block_end for target in selected
+                )
+                remaining_slots -= len(selected)
+
+            remaining_candidates = [
+                target
+                for target in explicit_candidates
+                if target.index not in auto_to_cache
+            ]
+            if remaining_slots > 0 and remaining_candidates:
+                selected = self._select_spaced_targets(
+                    remaining_candidates,
+                    remaining_slots,
+                    reserved_positions,
+                )
+                auto_to_cache.update(target.index for target in selected)
+                reserved_positions.extend(
+                    target.block_end for target in selected
+                )
+                remaining_slots -= len(selected)
+
+        return _CacheSelection(
+            to_cache=always_cache | auto_to_cache,
+            request_cache_active=request_cache_active,
+        )
 
     @staticmethod
     def _apply_message_cache_control(
         anthropic_messages: Sequence[Dict[str, Any]],
         to_cache: Set[int],
+        cache_control: Dict[str, Any],
     ) -> None:
-        for i in to_cache:
-            msg = anthropic_messages[i]
-            if msg["content"]:
-                msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
+        for idx in to_cache:
+            msg = anthropic_messages[idx]
+            block = next(
+                (
+                    b
+                    for b in reversed(msg["content"])
+                    if b["type"] not in ("thinking", "redacted_thinking")
+                ),
+                None,
+            )
+            if block is not None:
+                block["cache_control"] = cache_control.copy()
 
-    @staticmethod
+    @classmethod
     def _build_system_blocks(
-        system_text: str, should_cache_system: bool
+        cls,
+        system_text: str,
+        should_cache_system: bool,
+        cache_control: Optional[Dict[str, Any]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         if not system_text:
             return None
         system_block = {"type": "text", "text": system_text}
         if should_cache_system:
-            system_block["cache_control"] = {"type": "ephemeral"}
+            if cache_control is None:
+                cache_control = cls._DEFAULT_CACHE_CONTROL
+            system_block["cache_control"] = cache_control.copy()
         return [system_block]
 
     @staticmethod
@@ -447,10 +638,12 @@ class AnthropicProvider(LLMProvider):
         )
 
     def complete(self, messages: Sequence[Message]) -> LLMResponse:
+        api_params = self.api_params.copy()
+        user_cache_control = api_params.pop("cache_control", None)
         kwargs = {
             "model": self.model,
             "stream": self.stream,
-            **self.api_params,
+            **api_params,
         }
         kwargs.setdefault("max_tokens", self._max_tokens_cap(self.model))
         (
@@ -460,21 +653,87 @@ class AnthropicProvider(LLMProvider):
             always_cache,
             never_cache,
         ) = self._collect_request_messages(messages)
+        always_cache = {
+            i
+            for i in always_cache
+            if i < len(kwargs["messages"]) and kwargs["messages"][i]["content"]
+        }
 
         should_cache_system = self._should_cache_system(
-            system_text, force_cache_system
+            system_text,
+            force_cache_system,
+            always_cache,
         )
-        to_cache = self._select_default_cache_targets(
+        extra_body = kwargs.get("extra_body")
+        extra_body_cache_control = None
+        if isinstance(extra_body, dict):
+            extra_body_cache_control = extra_body.get("cache_control")
+        user_top_level_cache = extra_body_cache_control is not None
+
+        explicit_breakpoints = len(always_cache) + int(should_cache_system)
+        if (
+            user_top_level_cache
+            and explicit_breakpoints >= self._MAX_CACHE_BREAKPOINTS
+        ):
+            raise CompletionError(
+                "Anthropic does not allow a request-level cache_control "
+                f"together with {self._MAX_CACHE_BREAKPOINTS} explicit "
+                "cache breakpoints; remove cache_control from extra_body "
+                "or unset anthropic_cache_breakpoint metadata on a "
+                "message."
+            )
+        if explicit_breakpoints > self._MAX_CACHE_BREAKPOINTS:
+            raise CompletionError(
+                f"Anthropic supports at most {self._MAX_CACHE_BREAKPOINTS}"
+                " explicit cache breakpoints"
+            )
+        tools = kwargs.get("tools")
+        if isinstance(tools, (list, tuple)):
+            tool_block_count = len(tools)
+        else:
+            tool_block_count = 0
+        cache_selection = self._select_default_cache_targets(
             kwargs["messages"],
+            system_text,
             always_cache,
             never_cache,
             should_cache_system,
+            force_request_cache=user_top_level_cache,
+            prefix_block_count=tool_block_count,
         )
-        self._apply_message_cache_control(kwargs["messages"], to_cache)
+        to_cache = cache_selection.to_cache
+        request_cache_active = cache_selection.request_cache_active
 
-        system = self._build_system_blocks(system_text, should_cache_system)
+        effective_cache_control = self._DEFAULT_CACHE_CONTROL.copy()
+        if user_cache_control is not None:
+            effective_cache_control.update(user_cache_control)
+        if extra_body_cache_control is not None:
+            effective_cache_control.update(extra_body_cache_control)
+        # One shared cache_control guarantees one TTL per request. This avoids
+        # the API's 400 when the last explicit breakpoint TTL differs from
+        # the automatic request-level TTL, and sidesteps the rule that longer
+        # TTL breakpoints must precede shorter-TTL breakpoints.
+        self._apply_message_cache_control(
+            kwargs["messages"], to_cache, effective_cache_control
+        )
+
+        system = self._build_system_blocks(
+            system_text,
+            should_cache_system,
+            effective_cache_control if should_cache_system else None,
+        )
         if system is not None:
             kwargs["system"] = system
+
+        if request_cache_active:
+            extra_body = kwargs.get("extra_body")
+            if extra_body is None:
+                extra_body = {}
+            else:
+                extra_body = extra_body.copy()
+
+            extra_body["cache_control"] = effective_cache_control.copy()
+            kwargs["extra_body"] = extra_body
 
         try:
             resp = self._anthropic.messages.create(**kwargs)
@@ -516,6 +775,7 @@ class AnthropicProvider(LLMProvider):
 
     def validate_api_params(self, params):
         special_opts = frozenset(("model", "messages", "stream", "system"))
+        supported_extra_opts = frozenset(("cache_control", "extra_body"))
         valid_opts = (
             frozenset(
                 inspect.signature(
@@ -523,15 +783,36 @@ class AnthropicProvider(LLMProvider):
                 ).parameters.keys()
             )
             - special_opts
+            | supported_extra_opts
         )
         clamped = {"temperature": (0, 1)}
 
         for opt in params:
             if opt not in valid_opts:
                 raise InvalidAPIParameterError(f"Unknown parameter {opt}")
-            if opt == "max_tokens":
+            if opt == "cache_control":
+                if params[opt] is None:
+                    continue
+                if not isinstance(params[opt], dict):
+                    raise InvalidAPIParameterError(
+                        "cache_control must be a dict"
+                    )
+            elif opt == "max_tokens":
                 hi = self.__class__._max_tokens_cap(self.model)
                 params[opt] = self.__class__._clamp(params[opt], 0, hi)
+            elif opt == "extra_body":
+                extra_body = params[opt]
+                if extra_body is None:
+                    continue
+                if not isinstance(extra_body, dict):
+                    raise InvalidAPIParameterError("extra_body must be a dict")
+                extra_body_cache_control = extra_body.get("cache_control")
+                if extra_body_cache_control is None:
+                    continue
+                if not isinstance(extra_body_cache_control, dict):
+                    raise InvalidAPIParameterError(
+                        "extra_body cache_control must be a dict"
+                    )
             elif opt in clamped:
                 params[opt] = self.__class__._clamp(params[opt], *clamped[opt])
         return params

@@ -31,7 +31,7 @@ Switched to account 'default'
 Consult Gptcmd's readme for additional usage instructions.
 
 ## Prompt caching
-To save costs, Gptcmd-anthropic dynamically inserts [cache breakpoints](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) on the system message (if present), the final user message, and the largest messages of a conversation based on content length and number of attachments.
+To save costs, Gptcmd-anthropic uses Anthropic's automatic cache breakpoint for the moving final turn of a conversation and uses any remaining explicit cache breakpoints on the system message (if present), large individual messages, and stable context portions. Anthropic cache lookups examine up to 20 earlier cacheable blocks per breakpoint, so explicit breakpoints balance large messages (based on number of blocks and content length) with block position rather than only using message size.
 
 You may override this dynamic strategy on a per-message basis by setting the `anthropic_cache_breakpoint` metadata field:
 
@@ -46,6 +46,13 @@ For instance:
 'Cache me!' added as user
 (claude-opus-4-20250514) meta anthropic_cache_breakpoint True
 anthropic_cache_breakpoint set to True on 'Cache me!'
+```
+
+You may also override any field in the `cache-control` object passed to Anthropic with the `cache_control` API parameter. For example, this changes cache breakpoints (implicit and explicit) to a one-hour TTL:
+
+```
+(claude-opus-4-20250514) set cache_control {"ttl": "1h"}
+cache_control set to {'ttl': '1h'}
 ```
 
 ## Extended thinking
