@@ -7,11 +7,13 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 """
 
-import anthropic
 import inspect
 
+from copy import deepcopy
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+import anthropic
 
 from gptcmd.llm import (
     CompletionError,
@@ -32,35 +34,14 @@ class AnthropicProvider(LLMProvider):
         super().__init__(*args, **kwargs)
         self._stream = True
 
-    def _render_message(self, msg: Message) -> Dict[str, Any]:
-        content = []
-        if (
-            "anthropic_thinking_text" in msg.metadata
-            and "anthropic_thinking_signature" in msg.metadata
-        ):
-            content.append(
-                {
-                    "type": "thinking",
-                    "signature": msg.metadata["anthropic_thinking_signature"],
-                    "thinking": msg.metadata["anthropic_thinking_text"],
-                }
-            )
-        content.extend(
-            [
-                {"type": "text", "text": msg.content},
-                *[self.format_attachment(a) for a in msg.attachments],
-            ]
-        )
-        return {"role": msg.role, "content": content}
-
     @classmethod
     def from_config(cls, conf: Dict):
-        SPECIAL_OPTS = (
+        special_opts = (
             "model",
             "provider",
         )
         model = conf.get("model")
-        client_opts = {k: v for k, v in conf.items() if k not in SPECIAL_OPTS}
+        client_opts = {k: v for k, v in conf.items() if k not in special_opts}
         client = anthropic.Anthropic(**client_opts)
         return cls(client, model=model)
 
@@ -172,120 +153,71 @@ class AnthropicProvider(LLMProvider):
         }
         return by_model.get(model, 4096)
 
-    def complete(self, messages):
-        kwargs = {
-            "model": self.model,
-            "stream": self.stream,
-            **self.api_params,
-        }
-        if "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = self._max_tokens_cap(self.model)
-        kwargs["messages"] = []
-        system_text = ""
-        force_cache_system = None
-        always_cache = set()
-        never_cache = set()
+    @staticmethod
+    def _collapse_content(
+        content1: Any, content2: Any
+    ) -> List[Dict[str, Any]]:
+        if isinstance(content1, str):
+            content1 = [{"type": "text", "text": content1}]
+        if isinstance(content2, str):
+            content2 = [{"type": "text", "text": content2}]
+        if not isinstance(content1, list) or not isinstance(content2, list):
+            raise CompletionError("Unexpected Anthropic content types")
+        return deepcopy(content1) + deepcopy(content2)
 
-        def _collapse(content1, content2):
-            if isinstance(content1, str):
-                if isinstance(content2, str):
-                    return content1 + content2
-                elif isinstance(content2, list):
-                    return [{"type": "text", "text": content1}] + content2
-            elif isinstance(content1, list):
-                if isinstance(content2, str):
-                    return content1 + [{"type": "text", "text": content2}]
-                elif isinstance(content2, list):
-                    return content1 + content2
-            else:
-                raise TypeError("Unexpected content types")
+    @staticmethod
+    def _message_weight(content: Sequence[Dict[str, Any]]) -> int:
+        total_text_length = sum(
+            len(block.get("text", ""))
+            for block in content
+            if block.get("type") == "text"
+        )
+        return len(content) * 1000 + total_text_length
 
-        for m in messages:
-            if m.role == MessageRole.SYSTEM:
-                if m.attachments:
-                    raise CompletionError(
-                        "Attachments on system messages aren't supported"
-                    )
-                if system_text:
-                    system_text += "\n\n" + m.content
-                else:
-                    system_text = m.content
+    @staticmethod
+    def _should_cache_system(
+        system_text: str, force_cache_system: Optional[bool]
+    ) -> bool:
+        if not system_text:
+            return False
+        if force_cache_system is True:
+            return True
+        if force_cache_system is False:
+            return False
+        return True
 
-                val = m.metadata.get("anthropic_cache_breakpoint")
-                if val is True:
-                    force_cache_system = True
-                elif val is False and force_cache_system is not True:
-                    force_cache_system = False
-            else:
-                rendered_message = self._render_message(m)
-                if (
-                    kwargs["messages"]
-                    and kwargs["messages"][-1]["role"]
-                    == rendered_message["role"]
-                ):
-                    # Claude doesn't support consecutive messages with the
-                    # same role.
-                    # "collapse" these spans to one message each.
-                    target_idx = len(kwargs["messages"]) - 1
-                    kwargs["messages"][-1]["content"] = _collapse(
-                        kwargs["messages"][-1]["content"],
-                        rendered_message["content"],
-                    )
-                else:
-                    kwargs["messages"].append(rendered_message)
-                    target_idx = len(kwargs["messages"]) - 1
-
-                val = m.metadata.get("anthropic_cache_breakpoint")
-                if val is True:
-                    always_cache.add(target_idx)
-                elif val is False:
-                    never_cache.add(target_idx)
-
-        cache_weights = []
-        for i, msg in enumerate(kwargs["messages"]):
-            num_blocks = len(msg["content"])
-            total_text_length = sum(
-                len(block.get("text", ""))
-                for block in msg["content"]
-                if block.get("type") == "text"
-            )
-            w = num_blocks * 1000 + total_text_length
-            cache_weights.append((i, w))
-
+    @classmethod
+    def _select_default_cache_targets(
+        cls,
+        anthropic_messages: Sequence[Dict[str, Any]],
+        always_cache: Set[int],
+        never_cache: Set[int],
+        should_cache_system: bool,
+    ) -> Set[int]:
+        cache_weights = [
+            (i, cls._message_weight(msg["content"]))
+            for i, msg in enumerate(anthropic_messages)
+        ]
         cache_candidates = sorted(
-            cache_weights, key=lambda x: x[1], reverse=True
+            cache_weights, key=lambda item: item[1], reverse=True
         )
 
-        should_cache_system = (
+        max_cache_breakpoints = 4
+        cache_slots = max(
             (
-                True
-                if force_cache_system is True
-                else (
-                    False if force_cache_system is False else True
-                )  # default to cache
-            )
-            if system_text
-            else False
+                max_cache_breakpoints
+                - len(always_cache)
+                - (1 if should_cache_system else 0)
+            ),
+            0,
         )
 
-        MAX_CACHE_BREAKPOINTS = 4
-        # Reserve slots already taken by explicit user requests and the
-        # system message if applicable.
-        free_cache_slots = (
-            MAX_CACHE_BREAKPOINTS
-            - len(always_cache)
-            - (1 if should_cache_system else 0)
-        )
-        free_cache_slots = max(free_cache_slots, 0)
-
-        auto_to_cache: set[int] = set()
-
-        # Try to reserve a slot for the very last user message
+        auto_to_cache: Set[int] = set()
         last_user_idx = next(
             (
                 i
-                for i in range(len(kwargs["messages"]) - 1, -1, -1)
-                if kwargs["messages"][i]["role"] == "user"
+                for i in range(len(anthropic_messages) - 1, -1, -1)
+                if anthropic_messages[i]["role"] == MessageRole.USER
             ),
             None,
         )
@@ -293,32 +225,241 @@ class AnthropicProvider(LLMProvider):
             last_user_idx is not None
             and last_user_idx not in always_cache
             and last_user_idx not in never_cache
-            and free_cache_slots > 0
+            and cache_slots > 0
         ):
             auto_to_cache.add(last_user_idx)
-            free_cache_slots -= 1
+            cache_slots -= 1
 
-        # Fill in remaining slots based on weights
         for i, _ in cache_candidates:
-            if free_cache_slots == 0:
+            if cache_slots == 0:
                 break
             if i in always_cache or i in never_cache or i in auto_to_cache:
                 continue
             auto_to_cache.add(i)
-            free_cache_slots -= 1
+            cache_slots -= 1
 
-        to_cache = always_cache | auto_to_cache
+        return always_cache | auto_to_cache
 
+    @staticmethod
+    def _apply_message_cache_control(
+        anthropic_messages: Sequence[Dict[str, Any]],
+        to_cache: Set[int],
+    ) -> None:
         for i in to_cache:
-            msg = kwargs["messages"][i]
+            msg = anthropic_messages[i]
             if msg["content"]:
                 msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
-        if system_text:
-            system_block = {"type": "text", "text": system_text}
-            if should_cache_system:
-                system_block["cache_control"] = {"type": "ephemeral"}
-            kwargs["system"] = [system_block]
+    @staticmethod
+    def _build_system_blocks(
+        system_text: str, should_cache_system: bool
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not system_text:
+            return None
+        system_block = {"type": "text", "text": system_text}
+        if should_cache_system:
+            system_block["cache_control"] = {"type": "ephemeral"}
+        return [system_block]
+
+    @staticmethod
+    def _extract_usage(
+        resp: Any,
+    ) -> Tuple[Optional[int], int, int, Optional[int]]:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return (None, 0, 0, None)
+        return (
+            getattr(usage, "input_tokens", None),
+            getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            getattr(usage, "cache_read_input_tokens", 0) or 0,
+            getattr(usage, "output_tokens", None),
+        )
+
+    @staticmethod
+    def _clamp(val, bottom, top):
+        return max(min(val, top), bottom)
+
+    @classmethod
+    def _append_message(
+        cls,
+        messages: List[Dict[str, Any]],
+        rendered_message: Dict[str, Any],
+    ) -> int:
+        if messages and messages[-1]["role"] == rendered_message["role"]:
+            messages[-1]["content"] = cls._collapse_content(
+                messages[-1]["content"],
+                rendered_message["content"],
+            )
+            return len(messages) - 1
+        messages.append(rendered_message)
+        return len(messages) - 1
+
+    @staticmethod
+    def _render_assistant_message(role: str, blocks: Sequence[Any]) -> Message:
+        output = []
+        thinking_text = []
+        thinking_signature = []
+
+        for block in blocks:
+            if block.type == "text":
+                output.append(block.text)
+            elif block.type == "thinking":
+                if hasattr(block, "thinking"):
+                    thinking_text.append(block.thinking)
+                if hasattr(block, "signature"):
+                    thinking_signature.append(block.signature)
+
+        msg = Message(content="".join(output), role=role)
+        if thinking_text or thinking_signature:
+            meta = msg.metadata
+            if thinking_text:
+                meta["anthropic_thinking_text"] = "".join(thinking_text)
+            if thinking_signature:
+                meta["anthropic_thinking_signature"] = "".join(
+                    thinking_signature
+                )
+        return msg
+
+    @classmethod
+    def _set_response_usage(
+        cls,
+        response: LLMResponse,
+        model: str,
+        usage: Tuple[Optional[int], int, int, Optional[int]],
+    ) -> None:
+        input_tokens, cache_write, cache_read, output_tokens = usage
+        response.sampled_tokens = output_tokens
+        if input_tokens is None:
+            response.prompt_tokens = None
+            response.cost_in_cents = None
+            return
+
+        response.prompt_tokens = input_tokens + cache_write
+        if output_tokens is None:
+            response.cost_in_cents = None
+            return
+
+        response.cost_in_cents = cls._estimate_cost_in_cents(
+            model=model,
+            prompt_tokens=input_tokens,
+            cache_write_tokens=cache_write,
+            cache_read_tokens=cache_read,
+            sampled_tokens=output_tokens,
+        )
+
+    def _message_content_to_anthropic(
+        self, msg: Message
+    ) -> List[Dict[str, Any]]:
+        content: List[Dict[str, Any]] = []
+        if (
+            "anthropic_thinking_text" in msg.metadata
+            and "anthropic_thinking_signature" in msg.metadata
+        ):
+            content.append(
+                {
+                    "type": "thinking",
+                    "signature": msg.metadata["anthropic_thinking_signature"],
+                    "thinking": msg.metadata["anthropic_thinking_text"],
+                }
+            )
+        content.extend(
+            [
+                {"type": "text", "text": msg.content},
+                *[self.format_attachment(a) for a in msg.attachments],
+            ]
+        )
+        return content
+
+    def _message_to_anthropic(self, msg: Message) -> Dict[str, Any]:
+        return {
+            "role": msg.role,
+            "content": self._message_content_to_anthropic(msg),
+        }
+
+    def _collect_request_messages(
+        self, messages: Sequence[Message]
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        str,
+        Optional[bool],
+        Set[int],
+        Set[int],
+    ]:
+        anthropic_messages: List[Dict[str, Any]] = []
+        system_text = ""
+        force_cache_system = None
+        always_cache: Set[int] = set()
+        never_cache: Set[int] = set()
+
+        for msg in messages:
+            if msg.role == MessageRole.SYSTEM:
+                if msg.attachments:
+                    raise CompletionError(
+                        "Attachments on system messages aren't supported"
+                    )
+                if system_text:
+                    system_text += "\n\n" + msg.content
+                else:
+                    system_text = msg.content
+
+                val = msg.metadata.get("anthropic_cache_breakpoint")
+                if val is True:
+                    force_cache_system = True
+                elif val is False and force_cache_system is not True:
+                    force_cache_system = False
+                continue
+
+            target_idx = self._append_message(
+                anthropic_messages,
+                self._message_to_anthropic(msg),
+            )
+
+            # Claude rejects consecutive messages with the same role, so
+            # metadata needs to follow the rendered span rather than the
+            # original message index.
+            val = msg.metadata.get("anthropic_cache_breakpoint")
+            if val is True:
+                always_cache.add(target_idx)
+            elif val is False:
+                never_cache.add(target_idx)
+
+        return (
+            anthropic_messages,
+            system_text,
+            force_cache_system,
+            always_cache,
+            never_cache,
+        )
+
+    def complete(self, messages: Sequence[Message]) -> LLMResponse:
+        kwargs = {
+            "model": self.model,
+            "stream": self.stream,
+            **self.api_params,
+        }
+        kwargs.setdefault("max_tokens", self._max_tokens_cap(self.model))
+        (
+            kwargs["messages"],
+            system_text,
+            force_cache_system,
+            always_cache,
+            never_cache,
+        ) = self._collect_request_messages(messages)
+
+        should_cache_system = self._should_cache_system(
+            system_text, force_cache_system
+        )
+        to_cache = self._select_default_cache_targets(
+            kwargs["messages"],
+            always_cache,
+            never_cache,
+            should_cache_system,
+        )
+        self._apply_message_cache_control(kwargs["messages"], to_cache)
+
+        system = self._build_system_blocks(system_text, should_cache_system)
+        if system is not None:
+            kwargs["system"] = system
 
         try:
             resp = self._anthropic.messages.create(**kwargs)
@@ -327,46 +468,12 @@ class AnthropicProvider(LLMProvider):
 
         if isinstance(resp, anthropic.Stream):
             return StreamedClaudeResponse(resp, self)
-        else:
-            # Build the message content while capturing any "thinking" blocks
-            _output = []
-            _thinking_text = []
-            _thinking_signature = []
 
-            for _block in resp.content:
-                if _block.type == "text":
-                    _output.append(_block.text)
-                elif _block.type == "thinking":
-                    if hasattr(_block, "thinking"):
-                        _thinking_text.append(_block.thinking)
-                    if hasattr(_block, "signature"):
-                        _thinking_signature.append(_block.signature)
-
-            msg = Message(
-                content="".join(_output),
-                role=resp.role,
-            )
-            if _thinking_text or _thinking_signature:
-                meta = msg.metadata
-                if _thinking_text:
-                    meta["anthropic_thinking_text"] = "".join(_thinking_text)
-                if _thinking_signature:
-                    meta["anthropic_thinking_signature"] = "".join(
-                        _thinking_signature
-                    )
-            return LLMResponse(
-                message=msg,
-                prompt_tokens=resp.usage.input_tokens
-                + resp.usage.cache_creation_input_tokens,
-                sampled_tokens=resp.usage.output_tokens,
-                cost_in_cents=self.__class__._estimate_cost_in_cents(
-                    model=resp.model,
-                    prompt_tokens=resp.usage.input_tokens,
-                    cache_write_tokens=resp.usage.cache_creation_input_tokens,
-                    cache_read_tokens=resp.usage.cache_read_input_tokens,
-                    sampled_tokens=resp.usage.output_tokens,
-                ),
-            )
+        res = LLMResponse(
+            message=self._render_assistant_message(resp.role, resp.content)
+        )
+        self._set_response_usage(res, resp.model, self._extract_usage(resp))
+        return res
 
     def get_best_model(self):
         return "claude-opus-4-7"
@@ -382,30 +489,26 @@ class AnthropicProvider(LLMProvider):
             "claude-3-opus-latest",
         }
 
-    @staticmethod
-    def _clamp(val, bottom, top):
-        return max(min(val, top), bottom)
-
     def validate_api_params(self, params):
-        SPECIAL_OPTS = frozenset(("model", "messages", "stream", "system"))
+        special_opts = frozenset(("model", "messages", "stream", "system"))
         valid_opts = (
             frozenset(
                 inspect.signature(
                     self._anthropic.messages.create
                 ).parameters.keys()
             )
-            - SPECIAL_OPTS
+            - special_opts
         )
-        CLAMPED = {"temperature": (0, 1)}
+        clamped = {"temperature": (0, 1)}
 
         for opt in params:
             if opt not in valid_opts:
                 raise InvalidAPIParameterError(f"Unknown parameter {opt}")
-            elif opt == "max_tokens":
+            if opt == "max_tokens":
                 hi = self.__class__._max_tokens_cap(self.model)
                 params[opt] = self.__class__._clamp(params[opt], 0, hi)
-            elif opt in CLAMPED:
-                params[opt] = self.__class__._clamp(params[opt], *CLAMPED[opt])
+            elif opt in clamped:
+                params[opt] = self.__class__._clamp(params[opt], *clamped[opt])
         return params
 
 
@@ -419,14 +522,14 @@ class StreamedClaudeResponse(LLMResponse):
         self._cache_read = 0
         self._sampled = 0
 
-        m = Message(content="", role="")
-        super().__init__(m)
+        message = Message(content="", role="")
+        super().__init__(message)
 
     def _put_metadata(self, key: str, addition: str) -> None:
         meta = self.message.metadata
         meta[key] = meta.get(key, "") + addition
 
-    def _update_usage(self, usage_obj):
+    def _update_usage(self, usage_obj: Any) -> None:
         self._prompt += getattr(usage_obj, "input_tokens", 0) or 0
         self._cache_write += (
             getattr(usage_obj, "cache_creation_input_tokens", 0) or 0
@@ -441,10 +544,6 @@ class StreamedClaudeResponse(LLMResponse):
             for chunk in self._stream:
                 if hasattr(chunk, "usage"):
                     self._update_usage(chunk.usage)
-                    # This is a final usage chunk
-                    # Since we likely haven't been disconnected, update the
-                    # real prompt/sampled fields as these results are
-                    # likely accurate.
                     self.prompt_tokens = self._prompt + self._cache_write
                     self.sampled_tokens = self._sampled
                     if self._model:
