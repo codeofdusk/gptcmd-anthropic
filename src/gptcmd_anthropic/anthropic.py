@@ -54,6 +54,10 @@ class AnthropicProvider(LLMProvider):
         sampled_tokens: int,
     ) -> Optional[Decimal]:
         COST_PER_PROMPT_SAMPLED: Dict[str, Tuple[Decimal, Decimal]] = {
+            "claude-opus-4-8": (
+                Decimal("5") / Decimal("1000000"),
+                Decimal("25") / Decimal("1000000"),
+            ),
             "claude-opus-4-7": (
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
@@ -137,6 +141,7 @@ class AnthropicProvider(LLMProvider):
     def _max_tokens_cap(model: str) -> int:
         """Return the model-specific hard limit, else 4096."""
         by_model = {
+            "claude-opus-4-8": 128000,
             "claude-opus-4-7": 128000,
             "claude-opus-4-6": 128000,
             "claude-opus-4-5-20251101": 64000,
@@ -476,7 +481,7 @@ class AnthropicProvider(LLMProvider):
         return res
 
     def get_best_model(self):
-        return "claude-opus-4-7"
+        return "claude-opus-4-8"
 
     @property
     def valid_models(self):
