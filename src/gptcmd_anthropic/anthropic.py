@@ -484,6 +484,16 @@ class AnthropicProvider(LLMProvider):
         if isinstance(resp, anthropic.Stream):
             return StreamedClaudeResponse(resp, self)
 
+        if resp.stop_reason == "refusal":
+            stop_details = getattr(resp, "stop_details", None)
+            if isinstance(stop_details, dict):
+                explanation = stop_details.get("explanation")
+            else:
+                explanation = getattr(stop_details, "explanation", None)
+            raise CompletionError(
+                explanation or "Anthropic refused the request"
+            )
+
         res = LLMResponse(
             message=self._render_assistant_message(resp.role, resp.content)
         )
@@ -599,6 +609,20 @@ class StreamedClaudeResponse(LLMResponse):
                     self._put_metadata(
                         "anthropic_thinking_signature", chunk.delta.signature
                     )
+                elif chunk.type == "message_delta":
+                    if chunk.delta.stop_reason == "refusal":
+                        stop_details = getattr(
+                            chunk.delta, "stop_details", None
+                        )
+                        if isinstance(stop_details, dict):
+                            explanation = stop_details.get("explanation")
+                        else:
+                            explanation = getattr(
+                                stop_details, "explanation", None
+                            )
+                        raise CompletionError(
+                            explanation or "Anthropic refused the request"
+                        )
         except anthropic.APIError as e:
             raise CompletionError(str(e)) from e
 
