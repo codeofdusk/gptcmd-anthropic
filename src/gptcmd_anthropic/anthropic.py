@@ -66,7 +66,7 @@ class AnthropicProvider(LLMProvider):
     def _estimate_cost_in_cents(
         model: str,
         prompt_tokens: int,
-        cache_write_tokens: int,
+        cache_write_tokens: Dict[str, int],
         cache_read_tokens: int,
         sampled_tokens: int,
     ) -> Optional[Decimal]:
@@ -145,19 +145,29 @@ class AnthropicProvider(LLMProvider):
             ),
         }
 
-        CACHE_WRITE_MULTIPLIER: Decimal = Decimal("1.25")
+        CACHE_WRITE_MULTIPLIERS: Dict[str, Decimal] = {
+            "5m": Decimal("1.25"),
+            "1h": Decimal("2"),
+        }
         CACHE_READ_MULTIPLIER: Decimal = Decimal("0.1")
 
         if model not in COST_PER_PROMPT_SAMPLED:
             return None
 
         prompt_scale, sampled_scale = COST_PER_PROMPT_SAMPLED[model]
-        cache_write_scale = prompt_scale * CACHE_WRITE_MULTIPLIER
+        cache_write_cost = Decimal("0")
+        for ttl, tokens in cache_write_tokens.items():
+            if tokens == 0:
+                continue
+            multiplier = CACHE_WRITE_MULTIPLIERS.get(ttl)
+            if multiplier is None:
+                return None
+            cache_write_cost += Decimal(tokens) * prompt_scale * multiplier
         cache_read_scale = prompt_scale * CACHE_READ_MULTIPLIER
 
         return (
             Decimal(prompt_tokens) * prompt_scale
-            + Decimal(cache_write_tokens) * cache_write_scale
+            + cache_write_cost
             + Decimal(cache_read_tokens) * cache_read_scale
             + Decimal(sampled_tokens) * sampled_scale
         ) * Decimal("100")
@@ -468,15 +478,54 @@ class AnthropicProvider(LLMProvider):
         return [system_block]
 
     @staticmethod
+    def _cache_write_tokens_by_ttl(
+        usage: Any,
+        fallback_ttl: str = "5m",
+    ) -> Dict[str, int]:
+        cache_creation = getattr(usage, "cache_creation", None)
+        if cache_creation is not None:
+            if isinstance(cache_creation, dict):
+                fields = cache_creation
+            elif hasattr(cache_creation, "model_dump"):
+                fields = cache_creation.model_dump()
+            elif hasattr(cache_creation, "dict"):
+                fields = cache_creation.dict()
+            else:
+                try:
+                    fields = vars(cache_creation)
+                except TypeError:
+                    fields = {}
+            res: Dict[str, int] = {}
+            prefix = "ephemeral_"
+            suffix = "_input_tokens"
+            for name, tokens in fields.items():
+                if not name.startswith(prefix) or not name.endswith(suffix):
+                    continue
+                ttl = name[len(prefix) : -len(suffix)]
+                res[ttl] = res.get(ttl, 0) + (tokens or 0)
+            if res:
+                return res
+
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        if cache_write:
+            return {fallback_ttl: cache_write}
+        return {}
+
+    @classmethod
     def _extract_usage(
+        cls,
         resp: Any,
-    ) -> Tuple[Optional[int], int, int, Optional[int]]:
+        fallback_cache_write_ttl: str = "5m",
+    ) -> Tuple[Optional[int], Dict[str, int], int, Optional[int]]:
         usage = getattr(resp, "usage", None)
         if usage is None:
-            return (None, 0, 0, None)
+            return (None, {}, 0, None)
         return (
             getattr(usage, "input_tokens", None),
-            getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cls._cache_write_tokens_by_ttl(
+                usage,
+                fallback_cache_write_ttl,
+            ),
             getattr(usage, "cache_read_input_tokens", 0) or 0,
             getattr(usage, "output_tokens", None),
         )
@@ -531,7 +580,7 @@ class AnthropicProvider(LLMProvider):
         cls,
         response: LLMResponse,
         model: str,
-        usage: Tuple[Optional[int], int, int, Optional[int]],
+        usage: Tuple[Optional[int], Dict[str, int], int, Optional[int]],
     ) -> None:
         input_tokens, cache_write, cache_read, output_tokens = usage
         response.sampled_tokens = output_tokens
@@ -540,7 +589,7 @@ class AnthropicProvider(LLMProvider):
             response.cost_in_cents = None
             return
 
-        response.prompt_tokens = input_tokens + cache_write
+        response.prompt_tokens = input_tokens + sum(cache_write.values())
         if output_tokens is None:
             response.cost_in_cents = None
             return
@@ -735,13 +784,21 @@ class AnthropicProvider(LLMProvider):
             extra_body["cache_control"] = effective_cache_control.copy()
             kwargs["extra_body"] = extra_body
 
+        fallback_cache_write_ttl = effective_cache_control.get("ttl", "5m")
+        if not isinstance(fallback_cache_write_ttl, str):
+            fallback_cache_write_ttl = "unknown"
+
         try:
             resp = self._anthropic.messages.create(**kwargs)
         except anthropic.APIError as e:
             raise CompletionError(str(e)) from e
 
         if isinstance(resp, anthropic.Stream):
-            return StreamedClaudeResponse(resp, self)
+            return StreamedClaudeResponse(
+                resp,
+                self,
+                fallback_cache_write_ttl,
+            )
 
         if resp.stop_reason == "refusal":
             stop_details = getattr(resp, "stop_details", None)
@@ -756,7 +813,11 @@ class AnthropicProvider(LLMProvider):
         res = LLMResponse(
             message=self._render_assistant_message(resp.role, resp.content)
         )
-        self._set_response_usage(res, resp.model, self._extract_usage(resp))
+        self._set_response_usage(
+            res,
+            resp.model,
+            self._extract_usage(resp, fallback_cache_write_ttl),
+        )
         return res
 
     def get_best_model(self):
@@ -819,12 +880,18 @@ class AnthropicProvider(LLMProvider):
 
 
 class StreamedClaudeResponse(LLMResponse):
-    def __init__(self, backing_stream, provider: AnthropicProvider):
+    def __init__(
+        self,
+        backing_stream,
+        provider: AnthropicProvider,
+        fallback_cache_write_ttl: str = "5m",
+    ):
         self._stream = backing_stream
         self._provider = provider
+        self._fallback_cache_write_ttl = fallback_cache_write_ttl
         self._model: str = ""
         self._prompt = 0
-        self._cache_write = 0
+        self._cache_write: Dict[str, int] = {}
         self._cache_read = 0
         self._sampled = 0
 
@@ -837,9 +904,11 @@ class StreamedClaudeResponse(LLMResponse):
 
     def _update_usage(self, usage_obj: Any) -> None:
         self._prompt += getattr(usage_obj, "input_tokens", 0) or 0
-        self._cache_write += (
-            getattr(usage_obj, "cache_creation_input_tokens", 0) or 0
-        )
+        for ttl, tokens in self._provider._cache_write_tokens_by_ttl(
+            usage_obj,
+            self._fallback_cache_write_ttl,
+        ).items():
+            self._cache_write[ttl] = self._cache_write.get(ttl, 0) + tokens
         self._cache_read += (
             getattr(usage_obj, "cache_read_input_tokens", 0) or 0
         )
@@ -850,13 +919,15 @@ class StreamedClaudeResponse(LLMResponse):
             for chunk in self._stream:
                 if hasattr(chunk, "usage"):
                     self._update_usage(chunk.usage)
-                    self.prompt_tokens = self._prompt + self._cache_write
+                    self.prompt_tokens = self._prompt + sum(
+                        self._cache_write.values()
+                    )
                     self.sampled_tokens = self._sampled
                     if self._model:
                         self.cost_in_cents = (
                             self._provider.__class__._estimate_cost_in_cents(
                                 model=self._model,
-                                prompt_tokens=self.prompt_tokens,
+                                prompt_tokens=self._prompt,
                                 cache_write_tokens=self._cache_write,
                                 cache_read_tokens=self._cache_read,
                                 sampled_tokens=self.sampled_tokens,
