@@ -8,13 +8,26 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 """
 
 import inspect
+import sys
 
 from copy import deepcopy
 from decimal import Decimal
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
+from enum import auto
+from typing import (
+    Any,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
 import anthropic
 
+from gptcmd.config import ConfigError
 from gptcmd.llm import (
     CompletionError,
     InvalidAPIParameterError,
@@ -23,6 +36,17 @@ from gptcmd.llm import (
     LLMResponse,
 )
 from gptcmd.message import Image, Message, MessageRole
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    from backports.strenum import StrEnum
+
+
+class PromptCachingStrategy(StrEnum):
+    AUTO = auto()
+    EXPLICIT = auto()
+    MANUAL = auto()
 
 
 class _CacheTarget(NamedTuple):
@@ -45,8 +69,27 @@ class AnthropicProvider(LLMProvider):
     # single-block message with 7000 text characters.
     _MIN_LARGE_CACHE_MESSAGE_WEIGHT = 8000
 
-    def __init__(self, client, *args, **kwargs):
+    def __init__(
+        self,
+        client,
+        *args,
+        prompt_caching_strategy: Union[PromptCachingStrategy, str] = (
+            PromptCachingStrategy.AUTO
+        ),
+        **kwargs,
+    ):
         self._anthropic = client
+        try:
+            self._prompt_caching_strategy = PromptCachingStrategy(
+                prompt_caching_strategy
+            )
+        except ValueError as e:
+            valid = ", ".join(
+                strategy.value for strategy in PromptCachingStrategy
+            )
+            raise ConfigError(
+                f"prompt_caching_strategy must be one of: {valid}"
+            ) from e
         self._models = {m.id for m in self._anthropic.models.list()}
         super().__init__(*args, **kwargs)
         self._stream = True
@@ -55,12 +98,21 @@ class AnthropicProvider(LLMProvider):
     def from_config(cls, conf: Dict):
         special_opts = (
             "model",
+            "prompt_caching_strategy",
             "provider",
         )
         model = conf.get("model")
+        prompt_caching_strategy = conf.get(
+            "prompt_caching_strategy",
+            PromptCachingStrategy.AUTO,
+        )
         client_opts = {k: v for k, v in conf.items() if k not in special_opts}
         client = anthropic.Anthropic(**client_opts)
-        return cls(client, model=model)
+        return cls(
+            client,
+            model=model,
+            prompt_caching_strategy=prompt_caching_strategy,
+        )
 
     @staticmethod
     def _estimate_cost_in_cents(
@@ -228,7 +280,10 @@ class AnthropicProvider(LLMProvider):
         if force_cache_system is not None:
             return bool(force_cache_system)
 
-        return len(always_cache) < self._MAX_CACHE_BREAKPOINTS
+        return (
+            self._prompt_caching_strategy != PromptCachingStrategy.MANUAL
+            and len(always_cache) < self._MAX_CACHE_BREAKPOINTS
+        )
 
     @classmethod
     def _select_spaced_targets(
@@ -324,8 +379,12 @@ class AnthropicProvider(LLMProvider):
             and targets[-1].index in never_cache
             and targets[-1].index not in always_cache
         )
+        auto_cache_enabled = (
+            self._prompt_caching_strategy == PromptCachingStrategy.AUTO
+        )
         request_cache_active = force_request_cache or (
-            total_blocks > 0
+            auto_cache_enabled
+            and total_blocks > 0
             and mandatory_breakpoints < self._MAX_CACHE_BREAKPOINTS
             and not tail_always_cache
             and not tail_never_cache
@@ -356,14 +415,50 @@ class AnthropicProvider(LLMProvider):
             if target.index not in always_cache
             and target.index not in never_cache
         ]
-        explicit_candidates = eligible
-        if request_cache_active and targets:
-            tail_index = targets[-1].index
-            explicit_candidates = [
-                target for target in eligible if target.index != tail_index
-            ]
+        eligible_indices = {target.index for target in eligible}
+        tail_target = targets[-1] if targets else None
+        explicit_tail_target = next(
+            (
+                target
+                for target in reversed(targets)
+                if target.index in eligible_indices
+                and anthropic_messages[target.index]["role"]
+                == MessageRole.USER
+            ),
+            None,
+        )
+        should_cache_tail_explicitly = (
+            self._prompt_caching_strategy == PromptCachingStrategy.EXPLICIT
+            and free_explicit_slots > 0
+            and explicit_tail_target is not None
+            and (
+                not request_cache_active or explicit_tail_target != tail_target
+            )
+        )
+        if should_cache_tail_explicitly:
+            auto_to_cache.add(explicit_tail_target.index)
+            reserved_positions.append(explicit_tail_target.block_end)
+            free_explicit_slots -= 1
+        explicit_candidates = [
+            target
+            for target in eligible
+            if (
+                target != tail_target
+                or (
+                    not should_cache_tail_explicitly
+                    and not request_cache_active
+                )
+            )
+        ]
 
-        if free_explicit_slots > 0 and explicit_candidates:
+        auto_explicit_cache_enabled = (
+            self._prompt_caching_strategy != PromptCachingStrategy.MANUAL
+        )
+        if (
+            auto_explicit_cache_enabled
+            and free_explicit_slots > 0
+            and explicit_candidates
+        ):
             remaining_slots = free_explicit_slots
             large_message_candidates = [
                 target

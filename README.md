@@ -13,6 +13,8 @@ api_key = "sk-ant-xxxxx"  # Replace with your API key
 # Though not required, specifying a model in your configuration, similar to
 # openai and azure accounts, will use that model by default
 model = "claude-3-5-sonnet-latest"
+# Optional: choose "auto" (default), "explicit", or "manual" prompt caching.
+prompt_caching_strategy = "auto"
 # Any additional options are passed directly to the Python Anthropic client's
 # constructor for this account.
 ```
@@ -54,6 +56,12 @@ You may also override any field in the `cache-control` object passed to Anthropi
 (claude-opus-4-20250514) set cache_control {"ttl": "1h"}
 cache_control set to {'ttl': '1h'}
 ```
+
+The `prompt_caching_strategy` configuration option controls how breakpoints are selected:
+
+* `auto` is the default behaviour described above, which is recommended for most situations.
+* `explicit` disables the implicit request-level breakpoint and uses all available slots on explicit message or system breakpoints. This is useful for Anthropic-like providers that do not support the automatic breakpoint.
+* `manual` disables automatic breakpoint selection entirely. Only messages with an `anthropic_cache_breakpoint` metadata field set to `True` are set as cache breakpoints.
 
 ## Extended thinking
 You may enable extended thinking with a command like `set thinking {"type": "enabled", "budget_tokens": 1024}`. When extended thinking mode is enabled, a summary of the thinking process can be found at the `anthropic_thinking_text` metadata field on the generated assistant message.
