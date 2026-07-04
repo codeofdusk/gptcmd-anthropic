@@ -99,7 +99,7 @@ If you use this feature frequently, you might find a macro like this to be helpf
 ct = """
 account claude
 set thinking {{"type": "adaptive"}}
-set output_config {{"effort": "{1?max"}}}
+set output_config {{"effort": "{1?max}"}}
 """
 ```
 
