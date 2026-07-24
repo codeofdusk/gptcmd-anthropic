@@ -132,6 +132,10 @@ class AnthropicProvider(LLMProvider):
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
             ),
+            "claude-opus-5": (
+                Decimal("5") / Decimal("1000000"),
+                Decimal("25") / Decimal("1000000"),
+            ),
             "claude-opus-4-8": (
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
@@ -247,6 +251,7 @@ class AnthropicProvider(LLMProvider):
         by_model = {
             "claude-mythos-5": 128000,
             "claude-fable-5": 128000,
+            "claude-opus-5": 128000,
             "claude-opus-4-8": 128000,
             "claude-opus-4-7": 128000,
             "claude-opus-4-6": 128000,
@@ -934,7 +939,7 @@ class AnthropicProvider(LLMProvider):
         return res
 
     def get_best_model(self):
-        return "claude-opus-4-8"
+        return "claude-opus-5"
 
     @property
     def valid_models(self):
