@@ -124,7 +124,15 @@ class AnthropicProvider(LLMProvider):
         sampled_tokens: int,
     ) -> Optional[Decimal]:
         COST_PER_PROMPT_SAMPLED: Dict[str, Tuple[Decimal, Decimal]] = {
+            "claude-mythos-5-1": (
+                Decimal("10") / Decimal("1000000"),
+                Decimal("50") / Decimal("1000000"),
+            ),
             "claude-mythos-5": (
+                Decimal("10") / Decimal("1000000"),
+                Decimal("50") / Decimal("1000000"),
+            ),
+            "claude-fable-5-1": (
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
             ),
@@ -210,7 +218,10 @@ class AnthropicProvider(LLMProvider):
             "5m": Decimal("1.25"),
             "1h": Decimal("2"),
         }
-        CACHE_READ_MULTIPLIER: Decimal = Decimal("0.1")
+        CACHE_READ_MULTIPLIERS: Dict[str, Decimal] = {
+            "claude-mythos-5-1": Decimal("0.025"),
+            "claude-fable-5-1": Decimal("0.025"),
+        }
 
         if model not in COST_PER_PROMPT_SAMPLED:
             return None
@@ -236,7 +247,10 @@ class AnthropicProvider(LLMProvider):
             if multiplier is None:
                 return None
             cache_write_cost += Decimal(tokens) * prompt_scale * multiplier
-        cache_read_scale = prompt_scale * CACHE_READ_MULTIPLIER
+        cache_read_scale = prompt_scale * CACHE_READ_MULTIPLIERS.get(
+            model,
+            Decimal("0.1"),
+        )
 
         return (
             Decimal(prompt_tokens) * prompt_scale
@@ -249,7 +263,9 @@ class AnthropicProvider(LLMProvider):
     def _max_tokens_cap(model: str) -> int:
         """Return the model-specific hard limit, else 4096."""
         by_model = {
+            "claude-mythos-5-1": 128000,
             "claude-mythos-5": 128000,
+            "claude-fable-5-1": 128000,
             "claude-fable-5": 128000,
             "claude-opus-5": 128000,
             "claude-opus-4-8": 128000,
