@@ -11,7 +11,6 @@ import inspect
 import sys
 
 from copy import deepcopy
-from datetime import datetime, timezone
 from decimal import Decimal
 from enum import auto
 from typing import (
@@ -161,8 +160,8 @@ class AnthropicProvider(LLMProvider):
                 Decimal("25") / Decimal("1000000"),
             ),
             "claude-sonnet-5": (
-                Decimal("3") / Decimal("1000000"),
-                Decimal("15") / Decimal("1000000"),
+                Decimal("2") / Decimal("1000000"),
+                Decimal("10") / Decimal("1000000"),
             ),
             "claude-sonnet-4-6": (
                 Decimal("3") / Decimal("1000000"),
@@ -227,18 +226,6 @@ class AnthropicProvider(LLMProvider):
             return None
 
         prompt_scale, sampled_scale = COST_PER_PROMPT_SAMPLED[model]
-        if model == "claude-sonnet-5":
-            # This model has a time-limited promotional discount
-            if datetime.now(timezone.utc) < datetime(
-                2026,
-                9,
-                1,
-                tzinfo=timezone.utc,
-            ):
-                prompt_scale, sampled_scale = (
-                    Decimal("2") / Decimal("1000000"),
-                    Decimal("10") / Decimal("1000000"),
-                )
         cache_write_cost = Decimal("0")
         for ttl, tokens in cache_write_tokens.items():
             if tokens == 0:
