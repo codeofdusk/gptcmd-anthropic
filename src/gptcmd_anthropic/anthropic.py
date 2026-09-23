@@ -139,6 +139,10 @@ class AnthropicProvider(LLMProvider):
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
             ),
+            "claude-opus-5-5": (
+                Decimal("4") / Decimal("1000000"),
+                Decimal("20") / Decimal("1000000"),
+            ),
             "claude-opus-5": (
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
@@ -220,6 +224,7 @@ class AnthropicProvider(LLMProvider):
         CACHE_READ_MULTIPLIERS: Dict[str, Decimal] = {
             "claude-mythos-5-1": Decimal("0.025"),
             "claude-fable-5-1": Decimal("0.025"),
+            "claude-opus-5-5": Decimal("0.05"),
         }
 
         if model not in COST_PER_PROMPT_SAMPLED:
@@ -254,6 +259,7 @@ class AnthropicProvider(LLMProvider):
             "claude-mythos-5": 128000,
             "claude-fable-5-1": 128000,
             "claude-fable-5": 128000,
+            "claude-opus-5-5": 128000,
             "claude-opus-5": 128000,
             "claude-opus-4-8": 128000,
             "claude-opus-4-7": 128000,
@@ -942,7 +948,7 @@ class AnthropicProvider(LLMProvider):
         return res
 
     def get_best_model(self):
-        return "claude-opus-5"
+        return "claude-opus-5-5"
 
     @property
     def valid_models(self):
