@@ -175,6 +175,11 @@ class AnthropicProvider(LLMProvider):
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
             ),
+            "claude-sonnet-5-5": ModelCostInfo(
+                Decimal("2") / Decimal("1000000"),
+                Decimal("10") / Decimal("1000000"),
+                cache_discount_factor=Decimal("0.05"),
+            ),
             "claude-sonnet-5": ModelCostInfo(
                 Decimal("2") / Decimal("1000000"),
                 Decimal("10") / Decimal("1000000"),
@@ -289,6 +294,7 @@ class AnthropicProvider(LLMProvider):
             "claude-opus-4-5-20251101": 64000,
             "claude-opus-4-1-20250805": 32000,
             "claude-opus-4-20250514": 32000,
+            "claude-sonnet-5-5": 128000,
             "claude-sonnet-5": 128000,
             "claude-sonnet-4-6": 64000,
             "claude-sonnet-4-5-20250929": 64000,
