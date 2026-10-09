@@ -49,6 +49,15 @@ class PromptCachingStrategy(StrEnum):
     MANUAL = auto()
 
 
+class ModelCostInfo(NamedTuple):
+    prompt_scale: Decimal
+    sampled_scale: Decimal
+    cache_discount_factor: Decimal = Decimal("0.1")
+    long_prompt_threshold: Optional[int] = None
+    long_prompt_factor: Decimal = Decimal("1")
+    long_sampled_factor: Decimal = Decimal("1")
+
+
 class _CacheTarget(NamedTuple):
     index: int
     block_end: int
@@ -122,96 +131,106 @@ class AnthropicProvider(LLMProvider):
         cache_read_tokens: int,
         sampled_tokens: int,
     ) -> Optional[Decimal]:
-        COST_PER_PROMPT_SAMPLED: Dict[str, Tuple[Decimal, Decimal]] = {
-            "claude-mythos-5-1": (
+        COST_PER_PROMPT_SAMPLED: Dict[str, ModelCostInfo] = {
+            "claude-mythos-5-1": ModelCostInfo(
+                Decimal("10") / Decimal("1000000"),
+                Decimal("50") / Decimal("1000000"),
+                cache_discount_factor=Decimal("0.025"),
+            ),
+            "claude-mythos-5": ModelCostInfo(
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
             ),
-            "claude-mythos-5": (
+            "claude-fable-5-1": ModelCostInfo(
+                Decimal("10") / Decimal("1000000"),
+                Decimal("50") / Decimal("1000000"),
+                cache_discount_factor=Decimal("0.025"),
+            ),
+            "claude-fable-5": ModelCostInfo(
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
             ),
-            "claude-fable-5-1": (
-                Decimal("10") / Decimal("1000000"),
-                Decimal("50") / Decimal("1000000"),
-            ),
-            "claude-fable-5": (
-                Decimal("10") / Decimal("1000000"),
-                Decimal("50") / Decimal("1000000"),
-            ),
-            "claude-opus-5-5": (
+            "claude-opus-5-5": ModelCostInfo(
                 Decimal("4") / Decimal("1000000"),
                 Decimal("20") / Decimal("1000000"),
+                cache_discount_factor=Decimal("0.05"),
             ),
-            "claude-opus-5": (
+            "claude-opus-5": ModelCostInfo(
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
             ),
-            "claude-opus-4-8": (
+            "claude-opus-4-8": ModelCostInfo(
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
             ),
-            "claude-opus-4-7": (
+            "claude-opus-4-7": ModelCostInfo(
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
             ),
-            "claude-opus-4-6": (
+            "claude-opus-4-6": ModelCostInfo(
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
             ),
-            "claude-opus-4-5-20251101": (
+            "claude-opus-4-5-20251101": ModelCostInfo(
                 Decimal("5") / Decimal("1000000"),
                 Decimal("25") / Decimal("1000000"),
             ),
-            "claude-sonnet-5": (
+            "claude-sonnet-5": ModelCostInfo(
                 Decimal("2") / Decimal("1000000"),
                 Decimal("10") / Decimal("1000000"),
             ),
-            "claude-sonnet-4-6": (
+            "claude-sonnet-4-6": ModelCostInfo(
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
             ),
-            "claude-sonnet-4-5-20250929": (
+            "claude-sonnet-4-5-20250929": ModelCostInfo(
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
             ),
-            "claude-haiku-4-5-20251001": (
+            "claude-haiku-5-5": ModelCostInfo(
+                Decimal("0.1") / Decimal("1000000"),
+                Decimal("0.5") / Decimal("1000000"),
+                long_prompt_threshold=100000,
+                long_prompt_factor=Decimal("5"),
+                long_sampled_factor=Decimal("5"),
+            ),
+            "claude-haiku-4-5-20251001": ModelCostInfo(
                 Decimal("1") / Decimal("1000000"),
                 Decimal("5") / Decimal("1000000"),
             ),
-            "claude-opus-4-1-20250805": (
+            "claude-opus-4-1-20250805": ModelCostInfo(
                 Decimal("15") / Decimal("1000000"),
                 Decimal("75") / Decimal("1000000"),
             ),
-            "claude-sonnet-4-20250514": (
+            "claude-sonnet-4-20250514": ModelCostInfo(
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
             ),
-            "claude-3-7-sonnet-20250219": (
+            "claude-3-7-sonnet-20250219": ModelCostInfo(
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
             ),
-            "claude-3-5-sonnet-20241022": (
+            "claude-3-5-sonnet-20241022": ModelCostInfo(
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
             ),
-            "claude-3-5-haiku-20241022": (
+            "claude-3-5-haiku-20241022": ModelCostInfo(
                 Decimal("1") / Decimal("1000000"),
                 Decimal("5") / Decimal("1000000"),
             ),
-            "claude-opus-4-20250514": (
+            "claude-opus-4-20250514": ModelCostInfo(
                 Decimal("15") / Decimal("1000000"),
                 Decimal("75") / Decimal("1000000"),
             ),
-            "claude-3-opus-20240229": (
+            "claude-3-opus-20240229": ModelCostInfo(
                 Decimal("15") / Decimal("1000000"),
                 Decimal("75") / Decimal("1000000"),
             ),
-            "claude-3-sonnet-20240229": (
+            "claude-3-sonnet-20240229": ModelCostInfo(
                 Decimal("3") / Decimal("1000000"),
                 Decimal("15") / Decimal("1000000"),
             ),
-            "claude-3-haiku-20240307": (
+            "claude-3-haiku-20240307": ModelCostInfo(
                 Decimal("0.25") / Decimal("1000000"),
                 Decimal("1.25") / Decimal("1000000"),
             ),
@@ -221,16 +240,22 @@ class AnthropicProvider(LLMProvider):
             "5m": Decimal("1.25"),
             "1h": Decimal("2"),
         }
-        CACHE_READ_MULTIPLIERS: Dict[str, Decimal] = {
-            "claude-mythos-5-1": Decimal("0.025"),
-            "claude-fable-5-1": Decimal("0.025"),
-            "claude-opus-5-5": Decimal("0.05"),
-        }
-
-        if model not in COST_PER_PROMPT_SAMPLED:
+        info = COST_PER_PROMPT_SAMPLED.get(model)
+        if info is None:
             return None
 
-        prompt_scale, sampled_scale = COST_PER_PROMPT_SAMPLED[model]
+        # Cached input counts towards the long-context pricing tier.
+        total_input_tokens = prompt_tokens + cache_read_tokens
+        total_input_tokens += sum(cache_write_tokens.values())
+        long_context = (
+            info.long_prompt_threshold is not None
+            and total_input_tokens > info.long_prompt_threshold
+        )
+        prompt_scale = info.prompt_scale
+        sampled_scale = info.sampled_scale
+        if long_context:
+            prompt_scale *= info.long_prompt_factor
+            sampled_scale *= info.long_sampled_factor
         cache_write_cost = Decimal("0")
         for ttl, tokens in cache_write_tokens.items():
             if tokens == 0:
@@ -239,10 +264,7 @@ class AnthropicProvider(LLMProvider):
             if multiplier is None:
                 return None
             cache_write_cost += Decimal(tokens) * prompt_scale * multiplier
-        cache_read_scale = prompt_scale * CACHE_READ_MULTIPLIERS.get(
-            model,
-            Decimal("0.1"),
-        )
+        cache_read_scale = prompt_scale * info.cache_discount_factor
 
         return (
             Decimal(prompt_tokens) * prompt_scale
@@ -274,6 +296,7 @@ class AnthropicProvider(LLMProvider):
             "claude-3-7-sonnet-20250219": 64000,
             "claude-3-5-sonnet-20241022": 8192,
             "claude-3-5-sonnet-20240620": 8192,
+            "claude-haiku-5-5": 128000,
             "claude-haiku-4-5-20251001": 64000,
             "claude-3-5-haiku-20241022": 8192,
         }
