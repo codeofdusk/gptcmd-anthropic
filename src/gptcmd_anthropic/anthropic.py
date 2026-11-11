@@ -132,6 +132,11 @@ class AnthropicProvider(LLMProvider):
         sampled_tokens: int,
     ) -> Optional[Decimal]:
         COST_PER_PROMPT_SAMPLED: Dict[str, ModelCostInfo] = {
+            "claude-mythos-5-2": ModelCostInfo(
+                Decimal("8") / Decimal("1000000"),
+                Decimal("40") / Decimal("1000000"),
+                cache_discount_factor=Decimal("0.025"),
+            ),
             "claude-mythos-5-1": ModelCostInfo(
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
@@ -140,6 +145,11 @@ class AnthropicProvider(LLMProvider):
             "claude-mythos-5": ModelCostInfo(
                 Decimal("10") / Decimal("1000000"),
                 Decimal("50") / Decimal("1000000"),
+            ),
+            "claude-fable-5-2": ModelCostInfo(
+                Decimal("8") / Decimal("1000000"),
+                Decimal("40") / Decimal("1000000"),
+                cache_discount_factor=Decimal("0.025"),
             ),
             "claude-fable-5-1": ModelCostInfo(
                 Decimal("10") / Decimal("1000000"),
@@ -282,8 +292,10 @@ class AnthropicProvider(LLMProvider):
     def _max_tokens_cap(model: str) -> int:
         """Return the model-specific hard limit, else 4096."""
         by_model = {
+            "claude-mythos-5-2": 128000,
             "claude-mythos-5-1": 128000,
             "claude-mythos-5": 128000,
+            "claude-fable-5-2": 128000,
             "claude-fable-5-1": 128000,
             "claude-fable-5": 128000,
             "claude-opus-5-5": 128000,
